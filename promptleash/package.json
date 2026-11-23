@@ -1,0 +1,1 @@
+{"name":"promptleash","version":"1.0.2","private":true,"license":"MIT","scripts":{"test":"node --test tests/*.test.cjs","test:e2e":"node tests/e2e.cjs","build":"python3 scripts/build.py"},"devDependencies":{"playwright":"1.58.2"}}

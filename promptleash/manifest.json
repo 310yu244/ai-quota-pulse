@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "AI 训狗器 (PromptLeash)",
+  "short_name": "AI 训狗器",
+  "version": "1.0.2",
+  "description": "把上下文带走，把回答拉回正题。纯本地的对话小助手。",
+  "permissions": ["storage"],
+  "action": {"default_popup":"popup.html","default_title":"AI 训狗器 (PromptLeash)"},
+  "icons": {"16":"icons/16.png","32":"icons/32.png","48":"icons/48.png","128":"icons/128.png"},
+  "content_scripts": [{"matches":["https://chatgpt.com/*","https://chat.openai.com/*","https://claude.ai/*"],"js":["extract.js","adapters.js","content.js"],"run_at":"document_idle"}]
+}
