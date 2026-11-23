@@ -1,0 +1,93 @@
+const {chromium} = require('playwright');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs');
+const root = path.resolve(__dirname, '..');
+const profile = root + '/.test-profile';
+const fixture = site => `<!doctype html><html lang="zh"><body><div ${site === 'chatgpt' ? 'data-message-author-role="user"' : 'data-testid="user-message"'}>做离线工具。决定采用 CSV。不要联网。</div>${site === 'chatgpt' ? '<div data-message-author-role="assistant">好的，采用 CSV。</div>' : '<div data-testid="assistant-message" data-cds="AssistantMessage" data-is-streaming="false"><h3 class="sr-only">已确定：错误的隐藏标题。</h3><div>已确定：错误的思考状态。</div><div class="standard-markdown">已确定：仅使用 Python 标准库。</div></div>'}<div contenteditable="true" ${site === 'chatgpt' ? 'id="prompt-textarea"' : 'class="ProseMirror"'}></div><button ${site === 'chatgpt' ? 'data-testid="send-button"' : 'aria-label="Send message"'}>发送</button><script>window.sent=[];const editor=document.querySelector('[contenteditable]');document.querySelector('button').onclick=()=>{window.sent.push(editor.innerText);editor.innerText='';};editor.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();document.querySelector('button').click();}});</script></body></html>`;
+(async () => {
+  const context = await chromium.launchPersistentContext(profile, {executablePath:process.env.CHROME_PATH || '/home/ubuntu/.local/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-extensions-except='+root,'--load-extension='+root]});
+  try {
+    const extensions = await context.newPage();await extensions.goto('chrome://extensions');
+    const id = await extensions.locator('extensions-item').first().getAttribute('id');
+    const popup = await context.newPage(); await popup.goto(`chrome-extension://${id}/popup.html`);
+    await popup.setViewportSize({width:360,height:600});
+    await popup.evaluate(() => document.fonts.ready);
+    assert.ok(await popup.evaluate(() => document.documentElement.scrollHeight <= innerHeight));
+    assert.ok(await popup.locator('footer').evaluate(el => el.getBoundingClientRect().bottom <= innerHeight));
+    console.log('PASS popup: 360x600 viewport, no vertical overflow, footer visible');
+    for (const site of ['chatgpt','claude']) {
+      const origin = site === 'chatgpt' ? 'https://chatgpt.com' : 'https://claude.ai';
+      await context.route(origin+'/**', route => route.fulfill({contentType:'text/html; charset=utf-8',body:fixture(site)}));
+      await popup.evaluate(() => chrome.storage.local.clear());
+      await popup.reload();
+      const page = await context.newPage(); await page.goto(origin+'/');
+      await page.locator('#promptleash .pill').click();
+      const panel = page.locator('#promptleash');
+      await panel.locator('#extract').click();
+      assert.match(await panel.locator('textarea').inputValue(),/决定采用 CSV/);
+      if (site === 'claude') {
+        const card = await panel.locator('textarea').inputValue();
+        assert.equal(card.split('已确定：仅使用 Python 标准库。').length,2);
+        assert.doesNotMatch(card,/错误的隐藏标题|错误的思考状态/);
+        await page.evaluate(() => {
+          document.querySelector('[data-testid="assistant-message"]').classList.add('font-claude-response');
+          const modern = document.createElement('div');
+          modern.dataset.testid = 'assistant-message';
+          modern.textContent = '已确定：没有 markdown 时回退整个节点。';
+          modern.id = 'modern-fallback';
+          const legacy = document.createElement('div');
+          legacy.className = 'font-claude-response';
+          legacy.textContent = '已确定：旧版回复兜底。';
+          legacy.id = 'legacy-fallback';
+          document.body.append(modern,legacy);
+        });
+        await panel.locator('#extract').click();
+        const fallback = await panel.locator('textarea').inputValue();
+        assert.equal(fallback.split('已确定：仅使用 Python 标准库。').length,2);
+        assert.match(fallback,/已确定：没有 markdown 时回退整个节点。/);
+        assert.match(fallback,/已确定：旧版回复兜底。/);
+        await page.locator('#modern-fallback').evaluate(el => el.remove());
+        await page.locator('#legacy-fallback').evaluate(el => el.remove());
+        await panel.locator('#extract').click();
+        console.log('PASS claude replies: standard-markdown only, no heading/status text, no duplicate node, whole-node and legacy fallbacks');
+      }
+      await panel.locator('#concise').check();
+      await page.locator('[contenteditable]').fill('正常问题');await page.locator('[contenteditable]').press('Enter');
+      await page.locator('[contenteditable]').press('Enter');
+      await page.waitForFunction(() => sent.length === 1);
+      assert.match((await page.evaluate(() => sent))[0],/正常问题\n{2,}【回答要求】.*300 字/);
+      await page.locator('[contenteditable]').fill('点击发送');await page.locator('body > button').click();
+      await page.waitForFunction(() => sent.length === 2);
+      assert.equal((await page.evaluate(() => sent))[1].split('【回答要求】').length,2);
+      await page.locator('[contenteditable]').fill('换行草稿');await page.locator('[contenteditable]').press('Shift+Enter');
+      assert.equal((await page.evaluate(() => sent)).length,2);
+      await page.locator('[contenteditable]').fill('');
+      await page.evaluate(() => document.querySelector('#promptleash').remove());
+      await panel.waitFor();
+      await panel.getByRole('button',{name:'太长精简',exact:true}).click();await page.waitForFunction(() => sent.length === 3);
+      assert.match((await page.evaluate(() => sent))[2],/150 字/);
+      await popup.locator('#fillOnly').check();
+      await page.waitForTimeout(100);
+      await panel.getByRole('button',{name:'别瞎编',exact:true}).click();
+      assert.match(await page.locator('[contenteditable]').innerText(),/不要编造/);
+      assert.equal((await page.evaluate(() => sent)).length,3);
+      await panel.getByRole('button',{name:'偏题重来',exact:true}).click();assert.match(await panel.locator('footer').innerText(),/已有草稿/);
+      await page.evaluate(() => document.querySelector('[contenteditable]').removeAttribute('contenteditable'));
+      await panel.getByRole('button',{name:'偏题重来',exact:true}).click();assert.match(await panel.locator('footer').innerText(),/未找到输入框/);
+      await page.evaluate(() => document.querySelector('#prompt-textarea, .ProseMirror').setAttribute('contenteditable','true'));
+      await page.locator('[contenteditable]').fill('');
+      await panel.locator('#carry').click();
+      await page.waitForFunction(() => document.querySelector('[contenteditable]')?.innerText.includes('【交接卡】'));
+      assert.equal((await page.evaluate(() => sent)).length,0);
+      assert.equal(await popup.evaluate(key => chrome.storage.local.get(key).then(x=>x[key]),'pending_'+site),undefined);
+      await page.reload();await page.locator('#promptleash').waitFor();assert.equal(await page.locator('[contenteditable]').innerText(),'');
+      await popup.evaluate(key=>chrome.storage.local.set({[key]:{text:'过期卡',createdAt:Date.now()-300001}}),'pending_'+site);
+      await page.reload();await page.locator('#promptleash').waitFor();assert.equal(await page.locator('[contenteditable]').innerText(),'');
+      await popup.locator('#showPanel').uncheck();await page.locator('#promptleash').waitFor({state:'hidden'});
+      console.log('PASS '+site+': extraction, Enter/click rule once, Shift+Enter, preset send/fill, draft protection, handoff once/no auto-send, expiry, popup visibility');
+      await page.close();
+    }
+    console.log('PASS isolated fixture end-to-end (not a real-site verification)');
+  } finally {await context.close();fs.rmSync(profile,{recursive:true,force:true});}
+})().catch(e=>{console.error(e);process.exitCode=1;});
